@@ -80,3 +80,31 @@ foreach(shader ${SHADERS})
     )
 endforeach()
 
+# ========== Unit Tests ==========
+
+# Performance Manager Unit Test
+add_executable(TestPerformanceManager
+    tests/unit/test_performance_manager.cpp
+    src/performance/performance_manager.cpp
+)
+target_include_directories(TestPerformanceManager PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(TestPerformanceManager PRIVATE pthread)
+
+# Enable testing
+enable_testing()
+add_test(NAME PerformanceManagerTest COMMAND TestPerformanceManager)
+
+# Shader Compilation Integration Test (requires display)
+add_executable(TestShaderCompilation
+    tests/integration/test_shader_compilation.cpp
+)
+target_link_libraries(TestShaderCompilation PRIVATE glfw GLEW::GLEW OpenGL::GL)
+target_include_directories(TestShaderCompilation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# Note: This test requires a display, will fail in headless environment
+
+# Shader Syntax Validation Test (no OpenGL context needed)
+add_executable(TestShaderSyntax
+    tests/unit/test_shader_syntax.cpp
+)
+add_test(NAME ShaderSyntaxTest COMMAND TestShaderSyntax WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
