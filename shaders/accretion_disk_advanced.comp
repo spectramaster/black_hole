@@ -1,0 +1,309 @@
+#version 410 core
+// Advanced Accretion Disk Rendering with Physical Effects
+// Features: Doppler shift, gravitational redshift, temperature gradient, beaming
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) writeonly uniform image2D outImage;
+layout(std140, binding = 1) uniform Camera {
+    vec3 camPos;     float _pad0;
+    vec3 camRight;   float _pad1;
+    vec3 camUp;      float _pad2;
+    vec3 camForward; float _pad3;
+    float tanHalfFov;
+    float aspect;
+    bool moving;
+    int   _pad4;
+} cam;
+
+layout(std140, binding = 2) uniform DiskParams {
+    float disk_r1;       // Inner radius (ISCO)
+    float disk_r2;       // Outer radius
+    float disk_spin;     // Black hole spin parameter (0-0.998)
+    float disk_thickness;
+} disk;
+
+layout(std140, binding = 3) uniform BlackHoleParams {
+    vec3 bh_position;
+    float bh_mass;
+    float bh_rs;  // Schwarzschild radius
+    vec3 _pad;
+};
+
+const float c = 299792458.0;
+const float D_LAMBDA = 1e7;
+const double ESCAPE_R = 1e30;
+const float PI = 3.14159265359;
+
+// Physical constants
+const float h_planck = 6.62607015e-34;  // Planck constant
+const float k_boltzmann = 1.380649e-23; // Boltzmann constant
+
+struct Ray {
+    float x, y, z, r, theta, phi;
+    float dr, dtheta, dphi;
+    float E, L;
+};
+
+// ===== Blackbody Radiation Color =====
+// Convert temperature (K) to RGB color
+vec3 blackbodyColor(float temperature) {
+    // Simplified Planck curve approximation for visible light
+    float t = temperature / 1000.0;  // Convert to kK for easier calculation
+
+    vec3 color;
+
+    // Red channel
+    if (t <= 66.0) {
+        color.r = 1.0;
+    } else {
+        float r = t - 60.0;
+        color.r = 1.29293618606 * pow(r, -0.1332047592);
+        color.r = clamp(color.r, 0.0, 1.0);
+    }
+
+    // Green channel
+    if (t <= 66.0) {
+        color.g = 0.39008157876 * log(t) - 0.63184144378;
+    } else {
+        float g = t - 60.0;
+        color.g = 1.12989086089 * pow(g, -0.0755148492);
+    }
+    color.g = clamp(color.g, 0.0, 1.0);
+
+    // Blue channel
+    if (t >= 66.0) {
+        color.b = 1.0;
+    } else if (t <= 19.0) {
+        color.b = 0.0;
+    } else {
+        float b = t - 10.0;
+        color.b = 0.54320678911 * log(b) - 1.19625408134;
+        color.b = clamp(color.b, 0.0, 1.0);
+    }
+
+    return color;
+}
+
+// ===== Shakura-Sunyaev Temperature Model =====
+// Temperature as a function of radius
+float diskTemperature(float r) {
+    // T ∝ (M/r³)^(1/4)
+    // Normalization: T ~ 10^6 K at 3*r_s
+    float r_norm = r / bh_rs;
+
+    if (r_norm < 3.0) {
+        r_norm = 3.0;  // ISCO for non-rotating black hole
+    }
+
+    // Temperature peaks at inner edge
+    float T = 1.0e6 * pow(3.0 / r_norm, 0.75);
+
+    // Clamp to reasonable range (3000K - 10^7 K)
+    return clamp(T, 3000.0, 1.0e7);
+}
+
+// ===== Gravitational Redshift =====
+float gravitationalRedshift(float r) {
+    // z_grav = 1/sqrt(1 - r_s/r) - 1
+    float factor = 1.0 - bh_rs / r;
+    if (factor <= 0.0) return 1000.0;  // Inside event horizon
+    return 1.0 / sqrt(factor) - 1.0;
+}
+
+// ===== Keplerian Velocity =====
+vec3 keplerianVelocity(vec3 position) {
+    // For a test particle in circular orbit around Schwarzschild black hole
+    // v = sqrt(GM/r) in tangential direction
+
+    float r = length(position);
+    float v_mag = sqrt(bh_mass * 6.67430e-11 / r);  // Speed
+
+    // Velocity is tangent to circular orbit (in x-z plane if y is up)
+    // For simplicity, assume disk rotates counterclockwise viewed from +y
+    vec3 radial = normalize(vec3(position.x, 0.0, position.z));
+    vec3 tangent = vec3(-radial.z, 0.0, radial.x);  // Perpendicular in x-z plane
+
+    return tangent * v_mag;
+}
+
+// ===== Doppler Shift =====
+float dopplerShift(vec3 position, vec3 viewDir) {
+    // β = v/c (velocity as fraction of light speed)
+    vec3 velocity = keplerianVelocity(position);
+    float beta = length(velocity) / c;
+
+    // Dot product: positive if moving toward observer
+    vec3 vel_unit = normalize(velocity);
+    float cos_theta = dot(vel_unit, -viewDir);
+
+    // Relativistic Doppler factor: δ = 1 / [γ(1 - β·cos(θ))]
+    float gamma = 1.0 / sqrt(1.0 - beta*beta);
+    float doppler_factor = 1.0 / (gamma * (1.0 - beta * cos_theta));
+
+    // Frequency shift: ν_obs = ν_emit * δ
+    // For our purposes, δ > 1 = blueshift, δ < 1 = redshift
+    return doppler_factor;
+}
+
+// ===== Relativistic Beaming =====
+float relativisticBeaming(vec3 position, vec3 viewDir) {
+    // Intensity boost: I' = δ³ * I
+    float doppler_factor = dopplerShift(position, viewDir);
+    return pow(doppler_factor, 3.0);
+}
+
+// ===== Ray Initialization =====
+Ray initRay(vec3 pos, vec3 dir) {
+    Ray ray;
+    ray.x = pos.x; ray.y = pos.y; ray.z = pos.z;
+    ray.r = length(pos);
+    ray.theta = acos(pos.z / ray.r);
+    ray.phi = atan(pos.y, pos.x);
+
+    float dx = dir.x, dy = dir.y, dz = dir.z;
+    ray.dr     = sin(ray.theta)*cos(ray.phi)*dx + sin(ray.theta)*sin(ray.phi)*dy + cos(ray.theta)*dz;
+    ray.dtheta = (cos(ray.theta)*cos(ray.phi)*dx + cos(ray.theta)*sin(ray.phi)*dy - sin(ray.theta)*dz) / ray.r;
+    ray.dphi   = (-sin(ray.phi)*dx + cos(ray.phi)*dy) / (ray.r * sin(ray.theta));
+
+    ray.L = ray.r * ray.r * sin(ray.theta) * ray.dphi;
+    float f = 1.0 - bh_rs / ray.r;
+    float dt_dL = sqrt((ray.dr*ray.dr)/f + ray.r*ray.r*(ray.dtheta*ray.dtheta + sin(ray.theta)*sin(ray.theta)*ray.dphi*ray.dphi));
+    ray.E = f * dt_dL;
+
+    return ray;
+}
+
+// ===== Geodesic Integration =====
+void geodesicRHS(Ray ray, out vec3 d1, out vec3 d2) {
+    float r = ray.r, theta = ray.theta;
+    float dr = ray.dr, dtheta = ray.dtheta, dphi = ray.dphi;
+    float f = 1.0 - bh_rs / r;
+    float dt_dL = ray.E / f;
+
+    d1 = vec3(dr, dtheta, dphi);
+    d2.x = - (bh_rs / (2.0 * r*r)) * f * dt_dL * dt_dL
+         + (bh_rs / (2.0 * r*r * f)) * dr * dr
+         + r * (dtheta*dtheta + sin(theta)*sin(theta)*dphi*dphi);
+    d2.y = -2.0*dr*dtheta/r + sin(theta)*cos(theta)*dphi*dphi;
+    d2.z = -2.0*dr*dphi/r - 2.0*cos(theta)/(sin(theta)) * dtheta * dphi;
+}
+
+void rk4Step(inout Ray ray, float dL) {
+    vec3 k1a, k1b;
+    geodesicRHS(ray, k1a, k1b);
+
+    ray.r      += dL * k1a.x;
+    ray.theta  += dL * k1a.y;
+    ray.phi    += dL * k1a.z;
+    ray.dr     += dL * k1b.x;
+    ray.dtheta += dL * k1b.y;
+    ray.dphi   += dL * k1b.z;
+
+    ray.x = ray.r * sin(ray.theta) * cos(ray.phi);
+    ray.y = ray.r * sin(ray.theta) * sin(ray.phi);
+    ray.z = ray.r * cos(ray.theta);
+}
+
+// ===== Disk Intersection =====
+bool crossesEquatorialPlane(vec3 oldPos, vec3 newPos, out vec3 hitPos) {
+    bool crossed = (oldPos.y * newPos.y < 0.0);
+    if (!crossed) return false;
+
+    // Linear interpolation to find intersection point
+    float t = -oldPos.y / (newPos.y - oldPos.y);
+    hitPos = oldPos + t * (newPos - oldPos);
+
+    float r = length(vec2(hitPos.x, hitPos.z));
+    return (r >= disk_r1 && r <= disk_r2);
+}
+
+// ===== Main Shader =====
+void main() {
+    int WIDTH  = cam.moving ? 200 : 200;
+    int HEIGHT = cam.moving ? 150 : 150;
+
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= WIDTH || pix.y >= HEIGHT) return;
+
+    // Initialize ray
+    float u = (2.0 * (pix.x + 0.5) / WIDTH - 1.0) * cam.aspect * cam.tanHalfFov;
+    float v = (1.0 - 2.0 * (pix.y + 0.5) / HEIGHT) * cam.tanHalfFov;
+    vec3 dir = normalize(u * cam.camRight - v * cam.camUp + cam.camForward);
+    Ray ray = initRay(cam.camPos, dir);
+
+    vec4 color = vec4(0.0);
+    vec3 prevPos = vec3(ray.x, ray.y, ray.z);
+
+    bool hitBlackHole = false;
+    bool hitDisk = false;
+    vec3 diskHitPos;
+
+    int steps = cam.moving ? 60000 : 60000;
+
+    // Ray marching
+    for (int i = 0; i < steps; ++i) {
+        // Check black hole intersection
+        if (ray.r <= bh_rs) {
+            hitBlackHole = true;
+            break;
+        }
+
+        // Step forward
+        rk4Step(ray, D_LAMBDA);
+        vec3 newPos = vec3(ray.x, ray.y, ray.z);
+
+        // Check disk intersection
+        if (crossesEquatorialPlane(prevPos, newPos, diskHitPos)) {
+            hitDisk = true;
+            break;
+        }
+
+        prevPos = newPos;
+        if (ray.r > ESCAPE_R) break;
+    }
+
+    // ===== Rendering =====
+    if (hitDisk) {
+        float r = length(diskHitPos);
+
+        // 1. Base temperature from Shakura-Sunyaev model
+        float T = diskTemperature(r);
+
+        // 2. Gravitational redshift
+        float z_grav = gravitationalRedshift(r);
+        float T_redshifted = T / (1.0 + z_grav);
+
+        // 3. Doppler shift
+        float doppler_factor = dopplerShift(diskHitPos, dir);
+        float T_final = T_redshifted * doppler_factor;
+
+        // 4. Get blackbody color
+        vec3 diskColor = blackbodyColor(T_final);
+
+        // 5. Apply relativistic beaming (intensity boost)
+        float beaming = relativisticBeaming(diskHitPos, dir);
+
+        // 6. Distance-based brightness falloff
+        float r_norm = (r - disk_r1) / (disk_r2 - disk_r1);
+        float brightness = 1.0 - 0.5 * r_norm;  // Inner parts brighter
+
+        // 7. Combine effects
+        vec3 finalColor = diskColor * beaming * brightness;
+
+        // 8. Add subtle color variations for visual interest
+        float angle = atan(diskHitPos.z, diskHitPos.x);
+        float turbulence = 0.9 + 0.1 * sin(angle * 8.0 + r / disk_r1);
+        finalColor *= turbulence;
+
+        color = vec4(finalColor, 1.0);
+
+    } else if (hitBlackHole) {
+        color = vec4(0.0, 0.0, 0.0, 1.0);  // Pure black
+    } else {
+        // Background (star field could go here)
+        color = vec4(0.0, 0.0, 0.02, 1.0);  // Very dark blue
+    }
+
+    imageStore(outImage, pix, color);
+}

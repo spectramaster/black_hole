@@ -178,8 +178,20 @@ struct Engine {
             cerr << "GLFW init failed\n";
             exit(EXIT_FAILURE);
         }
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+
+        // Platform-specific OpenGL version
+        #ifdef __APPLE__
+            // macOS only supports up to OpenGL 4.1
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+            cout << "[INFO] macOS detected, using OpenGL 4.1" << endl;
+        #else
+            // Linux/Windows can use 4.3+
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+            cout << "[INFO] Using OpenGL 4.3" << endl;
+        #endif
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         window = glfwCreateWindow(WIDTH, HEIGHT, "Black Hole", nullptr, nullptr);
         if (!window) {
@@ -198,6 +210,18 @@ struct Engine {
             exit(EXIT_FAILURE);
         }
         cout << "OpenGL " << glGetString(GL_VERSION) << "\n";
+
+        // Check for compute shader support
+        #ifdef __APPLE__
+            // On macOS, check for ARB_compute_shader extension
+            if (glewIsSupported("GL_ARB_compute_shader")) {
+                cout << "[INFO] Compute shaders supported via GL_ARB_compute_shader" << endl;
+            } else {
+                cerr << "[WARNING] Compute shaders may not be fully supported on this Mac" << endl;
+                cerr << "[INFO] Attempting to use compute shaders anyway..." << endl;
+            }
+        #endif
+
         this->shaderProgram = CreateShaderProgram();
         gridShaderProgram = CreateShaderProgram("grid.vert", "grid.frag");
 
