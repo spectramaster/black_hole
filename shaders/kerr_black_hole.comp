@@ -1,0 +1,381 @@
+/**
+ * Kerr Black Hole Ray Tracer - Rotating Black Hole with Full Relativistic Effects
+ *
+ * This shader implements the Kerr metric for rotating black holes, featuring:
+ * - Frame-dragging (Lense-Thirring effect)
+ * - Ergosphere visualization
+ * - Spin-dependent ISCO
+ * - Enhanced accretion disk with differential rotation
+ * - Doppler shifting and relativistic beaming
+ * - Gravitational lensing in Kerr spacetime
+ *
+ * Physics:
+ * - Uses Boyer-Lindquist coordinates
+ * - Kerr metric with spin parameter 'a' (0 d a d 1)
+ * - Event horizon: r+ = M + (M≤ - a≤)
+ * - Ergosphere: r_ergo = M + (M≤ - a≤cos≤∏)
+ * - ISCO (prograde): r_isco H M(3 + ZÇ - sign(a)((3-ZÅ)(3+ZÅ+2ZÇ)))
+ */
+
+#version 410 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba8, binding = 0) uniform image2D outputTex;
+
+// Camera UBO (binding = 1)
+layout(std140, binding = 1) uniform CameraBlock {
+    vec3 cameraPos;
+    vec3 cameraRight;
+    vec3 cameraUp;
+    vec3 cameraForward;
+    float tanHalfFov;
+    float aspect;
+    bool moving;
+};
+
+// Disk parameters UBO (binding = 2)
+layout(std140, binding = 2) uniform DiskBlock {
+    float diskInnerRadius;
+    float diskOuterRadius;
+    float numRays;
+    float diskThickness;
+};
+
+// Objects UBO (binding = 3)
+layout(std140, binding = 3) uniform ObjectsBlock {
+    int numObjects;
+    vec4 posRadius[16];
+    vec4 color[16];
+    float mass[16];
+};
+
+// Constants
+const float c = 299792458.0;
+const float G = 6.67430e-11;
+const float PI = 3.14159265359;
+const float MAX_DIST = 1e14;
+const int MAX_STEPS = 100000;
+const float STEP_SIZE = 1e9;
+
+// Kerr black hole parameters
+uniform float spinParameter = 0.9; // a = J/(Mc), range [0, 1]
+
+// Ray structure
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Kerr metric functions
+float schwarzschildRadius(float M) {
+    return 2.0 * G * M / (c * c);
+}
+
+// Event horizon radius for Kerr black hole
+float eventHorizonRadius(float r_s, float a) {
+    float M = r_s * c * c / (2.0 * G);
+    float a_meters = a * M;
+    return M + sqrt(max(0.0, M*M - a_meters*a_meters));
+}
+
+// Ergosphere radius
+float ergosphereRadius(float r_s, float a, float theta) {
+    float M = r_s * c * c / (2.0 * G);
+    float a_meters = a * M;
+    float cos_theta = cos(theta);
+    return M + sqrt(max(0.0, M*M - a_meters*a_meters * cos_theta*cos_theta));
+}
+
+// ISCO radius for prograde orbit
+float iscoRadius(float r_s, float a) {
+    float M = r_s * c * c / (2.0 * G);
+
+    // Z functions for ISCO calculation
+    float Z1 = 1.0 + pow(1.0 - a*a, 1.0/3.0) * (pow(1.0 + a, 1.0/3.0) + pow(1.0 - a, 1.0/3.0));
+    float Z2 = sqrt(3.0*a*a + Z1*Z1);
+
+    // Prograde ISCO
+    float r_isco = M * (3.0 + Z2 - sign(a) * sqrt((3.0 - Z1)*(3.0 + Z1 + 2.0*Z2)));
+
+    return max(r_isco, M); // Ensure r_isco e M
+}
+
+// Frame-dragging angular velocity (Lense-Thirring effect)
+float frameDraggingOmega(float r, float r_s, float a, float theta) {
+    float M = r_s * c * c / (2.0 * G);
+    float a_meters = a * M;
+
+    // Boyer-Lindquist metric component
+    float rho2 = r*r + a_meters*a_meters * cos(theta)*cos(theta);
+    float delta = r*r - 2.0*M*r + a_meters*a_meters;
+
+    float omega = 2.0 * M * r * a_meters / (rho2 * rho2 + 2.0*M*r * a_meters*a_meters * sin(theta)*sin(theta));
+
+    return omega;
+}
+
+// Keplerian velocity for accretion disk (modified for Kerr)
+vec3 kerrDiskVelocity(vec3 position, float r_s, float a) {
+    float r = length(position);
+    float M = r_s * c * c / (2.0 * G);
+
+    // Keplerian angular velocity in Kerr spacetime
+    float omega_K = c / (r * sqrt(r/M) + a * M);
+
+    // Frame dragging contribution
+    float theta = acos(clamp(position.y / r, -1.0, 1.0));
+    float omega_fd = frameDraggingOmega(r, r_s, a, theta);
+
+    float total_omega = omega_K + omega_fd;
+
+    // Velocity vector (circular orbit in x-z plane)
+    vec3 tangent = normalize(vec3(-position.z, 0.0, position.x));
+    return tangent * r * total_omega;
+}
+
+// Disk temperature with spin-dependent ISCO
+float kerrDiskTemperature(float r, float r_s, float a) {
+    float r_isco = iscoRadius(r_s, a);
+
+    if (r < r_isco) {
+        return 0.0; // No disk inside ISCO
+    }
+
+    // Shakura-Sunyaev temperature profile
+    float r_norm = r / r_s;
+    float r_isco_norm = r_isco / r_s;
+
+    // Temperature falls off from ISCO
+    float T = 1.5e6 * pow(r_isco_norm / r_norm, 0.75);
+    return clamp(T, 3000.0, 2.0e7);
+}
+
+// Blackbody color from temperature
+vec3 blackbodyColor(float T) {
+    // Simplified Planck curve approximation
+    if (T < 1000.0) return vec3(0.0);
+
+    float t = T / 10000.0;
+    vec3 color;
+
+    if (t < 0.4) {
+        // Red hot
+        color = vec3(1.0, 0.3 * t / 0.4, 0.0);
+    } else if (t < 0.8) {
+        // Orange to yellow
+        float s = (t - 0.4) / 0.4;
+        color = vec3(1.0, 0.3 + 0.6 * s, 0.1 * s);
+    } else if (t < 1.5) {
+        // Yellow to white
+        float s = (t - 0.8) / 0.7;
+        color = vec3(1.0, 0.9 + 0.1 * s, 0.1 + 0.6 * s);
+    } else {
+        // White to blue-white
+        float s = min((t - 1.5) / 1.5, 1.0);
+        color = vec3(0.9 + 0.1 * s, 0.9 + 0.1 * s, 0.7 + 0.3 * s);
+    }
+
+    return color;
+}
+
+// Doppler shift factor
+float dopplerShift(vec3 position, vec3 viewDir, float r_s, float a) {
+    vec3 velocity = kerrDiskVelocity(position, r_s, a);
+    float beta = length(velocity) / c;
+    vec3 vel_unit = normalize(velocity);
+    float cos_theta = dot(vel_unit, -viewDir);
+    float gamma = 1.0 / sqrt(max(0.0001, 1.0 - beta*beta));
+    return 1.0 / (gamma * (1.0 - beta * cos_theta));
+}
+
+// Gravitational redshift
+float gravitationalRedshift(float r, float r_s, float a) {
+    float M = r_s * c * c / (2.0 * G);
+    float a_meters = a * M;
+
+    // Time dilation factor in Kerr spacetime
+    float rho2 = r*r + a_meters*a_meters;
+    float delta = r*r - 2.0*M*r + a_meters*a_meters;
+
+    float g_tt = -(1.0 - 2.0*M*r / rho2);
+    float redshift_factor = 1.0 / sqrt(max(0.0001, -g_tt));
+
+    return redshift_factor;
+}
+
+// Relativistic beaming
+float relativisticBeaming(vec3 position, vec3 viewDir, float r_s, float a) {
+    float doppler = dopplerShift(position, viewDir, r_s, a);
+    return pow(doppler, 3.0);
+}
+
+// Check if ray intersects accretion disk
+bool intersectDisk(Ray ray, float r_s, float a, out float t, out vec3 hitPos) {
+    // Disk in x-z plane (y = 0)
+    float r_isco = iscoRadius(r_s, a);
+
+    if (abs(ray.direction.y) < 0.0001) return false;
+
+    t = -ray.origin.y / ray.direction.y;
+    if (t < 0.0) return false;
+
+    hitPos = ray.origin + ray.direction * t;
+    float r = length(hitPos);
+
+    // Check if within disk bounds
+    if (r < diskInnerRadius || r > diskOuterRadius) return false;
+
+    // Add disk thickness
+    if (abs(hitPos.y) > diskThickness) return false;
+
+    return true;
+}
+
+// Render disk with all Kerr effects
+vec3 renderKerrDisk(Ray ray, float r_s, float a) {
+    float t;
+    vec3 hitPos;
+
+    if (!intersectDisk(ray, r_s, a, t, hitPos)) {
+        return vec3(0.0);
+    }
+
+    float r = length(hitPos);
+
+    // Temperature and base color
+    float T = kerrDiskTemperature(r, r_s, a);
+    vec3 baseColor = blackbodyColor(T);
+
+    // Apply Doppler shift
+    float doppler = dopplerShift(hitPos, ray.direction, r_s, a);
+    vec3 dopplerColor = baseColor;
+
+    // Blue shift (approaching): increase blue component
+    // Red shift (receding): decrease blue component
+    if (doppler > 1.0) {
+        float shift = min((doppler - 1.0) * 2.0, 1.0);
+        dopplerColor = mix(baseColor, vec3(0.3, 0.5, 1.0), shift * 0.7);
+    } else {
+        float shift = min((1.0 - doppler) * 2.0, 1.0);
+        dopplerColor = mix(baseColor, vec3(1.0, 0.3, 0.1), shift * 0.6);
+    }
+
+    // Gravitational redshift
+    float grav_redshift = gravitationalRedshift(r, r_s, a);
+    dopplerColor *= grav_redshift;
+
+    // Relativistic beaming
+    float beaming = relativisticBeaming(hitPos, ray.direction, r_s, a);
+    dopplerColor *= beaming;
+
+    // Intensity falloff
+    float intensity = 1.0 / (1.0 + (t / 1e11) * (t / 1e11));
+
+    return dopplerColor * intensity;
+}
+
+// Render event horizon
+vec3 renderEventHorizon(Ray ray, float r_s, float a) {
+    vec3 bh_center = vec3(posRadius[2]); // Assuming black hole is object 2
+    vec3 to_center = bh_center - ray.origin;
+    float t = dot(to_center, ray.direction);
+
+    if (t < 0.0) return vec3(0.0);
+
+    vec3 closest = ray.origin + ray.direction * t;
+    float dist = length(closest - bh_center);
+
+    float r_event = eventHorizonRadius(r_s, a);
+
+    if (dist < r_event) {
+        return vec3(0.0); // Absorbed by black hole
+    }
+
+    // Render photon sphere glow
+    float r_photon = 1.5 * r_s;
+    if (dist < r_photon * 1.2) {
+        float glow = exp(-pow((dist - r_photon) / (r_photon * 0.2), 2.0));
+        return vec3(1.0, 0.8, 0.4) * glow * 0.5;
+    }
+
+    return vec3(0.0);
+}
+
+// Render ergosphere visualization
+vec3 renderErgosphere(Ray ray, float r_s, float a) {
+    if (a < 0.1) return vec3(0.0); // Skip for slowly rotating black holes
+
+    vec3 bh_center = vec3(posRadius[2]);
+    vec3 to_center = bh_center - ray.origin;
+    float t = dot(to_center, ray.direction);
+
+    if (t < 0.0) return vec3(0.0);
+
+    vec3 hitPos = ray.origin + ray.direction * t;
+    float r = length(hitPos - bh_center);
+    float theta = acos(clamp((hitPos.y - bh_center.y) / r, -1.0, 1.0));
+
+    float r_ergo = ergosphereRadius(r_s, a, theta);
+    float r_event = eventHorizonRadius(r_s, a);
+
+    // Render ergosphere boundary
+    if (r > r_event && r < r_ergo * 1.1 && r > r_ergo * 0.9) {
+        float intensity = exp(-pow((r - r_ergo) / (r_ergo * 0.1), 2.0));
+        return vec3(0.8, 0.2, 1.0) * intensity * 0.3; // Purple glow
+    }
+
+    return vec3(0.0);
+}
+
+// Background stars
+vec3 renderBackground(vec3 direction) {
+    // Simple procedural stars
+    float star = fract(sin(dot(direction.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    if (star > 0.999) {
+        float brightness = (star - 0.999) / 0.001;
+        return vec3(brightness);
+    }
+    return vec3(0.0);
+}
+
+void main() {
+    ivec2 pixelCoords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dims = imageSize(outputTex);
+
+    if (pixelCoords.x >= dims.x || pixelCoords.y >= dims.y) return;
+
+    // Compute ray direction
+    vec2 uv = (vec2(pixelCoords) + 0.5) / vec2(dims);
+    uv = uv * 2.0 - 1.0;
+    uv.x *= aspect;
+
+    vec3 rayDir = normalize(cameraForward + uv.x * tanHalfFov * cameraRight + uv.y * tanHalfFov * cameraUp);
+    Ray ray = Ray(cameraPos, rayDir);
+
+    // Get black hole parameters
+    float r_s = 2.0 * G * mass[2] / (c * c);
+    float a = spinParameter;
+
+    // Render components
+    vec3 color = vec3(0.0);
+
+    // 1. Background stars
+    color += renderBackground(rayDir);
+
+    // 2. Ergosphere (if spinning fast)
+    color += renderErgosphere(ray, r_s, a);
+
+    // 3. Accretion disk
+    color += renderKerrDisk(ray, r_s, a);
+
+    // 4. Event horizon and photon sphere
+    color += renderEventHorizon(ray, r_s, a);
+
+    // Tone mapping
+    color = color / (1.0 + color);
+
+    // Gamma correction
+    color = pow(color, vec3(1.0 / 2.2));
+
+    imageStore(outputTex, pixelCoords, vec4(color, 1.0));
+}

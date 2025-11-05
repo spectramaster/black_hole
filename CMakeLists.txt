@@ -17,12 +17,13 @@ find_package(GLEW REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
-# TODO: Add imgui after setting up vcpkg
-# find_package(imgui CONFIG REQUIRED)
+
+# ImGui - using system package
+find_path(IMGUI_INCLUDE_DIR imgui/imgui.h REQUIRED)
+find_library(IMGUI_LIBRARY imgui REQUIRED)
 
 # Common dependencies
-set(DEPS glfw GLEW::GLEW glm::glm OpenGL::GL)
-# TODO: Add imgui::imgui after setup
+set(DEPS glfw GLEW::GLEW glm::glm OpenGL::GL ${IMGUI_LIBRARY})
 
 # 2D Lensing executable
 add_executable(BlackHole2D 2D_lensing.cpp)
@@ -53,4 +54,29 @@ endforeach()
 add_executable(TestMacCompat tests/test_mac_compatibility.cpp)
 target_link_libraries(TestMacCompat PRIVATE glfw GLEW::GLEW OpenGL::GL)
 target_include_directories(TestMacCompat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Simple ImGui test
+add_executable(TestImGui black_hole_simple_ui.cpp)
+target_link_libraries(TestImGui PRIVATE ${DEPS} stb)
+target_include_directories(TestImGui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    /usr/include/imgui
+)
+
+# UI-Enhanced Black Hole Simulator
+add_executable(BlackHoleUI black_hole_ui.cpp src/ui/imgui_interface.cpp)
+target_link_libraries(BlackHoleUI PRIVATE ${DEPS} stb)
+target_include_directories(BlackHoleUI PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    /usr/include/imgui
+)
+
+# Copy shaders for UI version
+foreach(shader ${SHADERS})
+    add_custom_command(TARGET BlackHoleUI POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${shader}
+        $<TARGET_FILE_DIR:BlackHoleUI>
+    )
+endforeach()
 
