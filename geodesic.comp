@@ -51,6 +51,8 @@
  */
 
 #version 430
+// Note: macOS OpenGL 4.1 does not officially support compute shaders (introduced in 4.3)
+// However, we try 430 and rely on driver extensions. If this fails on macOS, consider Metal.
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(binding = 0, rgba16f) writeonly uniform image2D outImage;

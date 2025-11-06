@@ -327,9 +327,15 @@ struct Engine {
             throw GLFWException("Failed to initialize GLFW");
         }
 
+        // 🍎 macOS OpenGL Compatibility Fix
+        // macOS only supports OpenGL up to 4.1 (deprecated since macOS 10.14)
+        // Request 4.1 Core Profile with forward compatibility
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);  // 4.1 is max on macOS (was 4.3)
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        #ifdef __APPLE__
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);  // Required on macOS
+        #endif
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Black Hole", nullptr, nullptr);
         if (!window) {

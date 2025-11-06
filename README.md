@@ -33,6 +33,10 @@ Real-time gravitational lensing and black hole visualization using GPU-accelerat
 
 ### Running on macOS
 
+⚠️ **macOS Limitation**: This project requires OpenGL 4.3 (compute shaders), but macOS only supports OpenGL 4.1. **The program may not work on macOS**. See **[MACOS_NOTES.md](MACOS_NOTES.md)** for details and alternatives.
+
+To attempt running on macOS:
+
 ```bash
 ./run_macos.sh
 ```
@@ -44,6 +48,10 @@ Real-time gravitational lensing and black hole visualization using GPU-accelerat
 ```
 
 ⚠️ **Important**: Always run from the **project root directory**, not from the `build/` folder, to ensure shader files can be found.
+
+**If it doesn't work on macOS**, try:
+- Use Linux or Windows (recommended)
+- Run BlackHole2D instead (simpler, no compute shaders): `./build/BlackHole2D`
 
 ### Running on Linux/Windows
 
