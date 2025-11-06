@@ -78,16 +78,38 @@ public:
     }
 
 private:
+    /**
+     * Try to find and load shader file from multiple locations
+     * Searches in:
+     * 1. Current working directory
+     * 2. Executable directory (for when run from build/)
+     * 3. Parent directory (for when run from build/)
+     */
     static std::string loadShaderFile(const char* path) {
-        std::ifstream file(path);
-        if (!file.is_open()) {
-            Logger::error("Failed to open shader file: ", path);
-            throw FileException(path, "Could not open file");
+        std::vector<std::string> searchPaths = {
+            std::string(path),                    // Current directory
+            std::string("../") + path,            // Parent directory (from build/)
+            std::string("../../") + path          // Two levels up (for nested build dirs)
+        };
+
+        for (const auto& searchPath : searchPaths) {
+            std::ifstream file(searchPath);
+            if (file.is_open()) {
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                Logger::info("Loaded shader from: ", searchPath);
+                return buffer.str();
+            }
         }
 
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        return buffer.str();
+        // If not found in any location, report error with all attempted paths
+        std::string errorMsg = "Failed to open shader file: " + std::string(path) +
+                              "\nSearched in:\n";
+        for (const auto& searchPath : searchPaths) {
+            errorMsg += "  - " + searchPath + "\n";
+        }
+        Logger::error(errorMsg);
+        throw FileException(path, "Could not find file in any search path");
     }
 
     static GLuint compileShader(GLenum type, const char* source, const char* name) {

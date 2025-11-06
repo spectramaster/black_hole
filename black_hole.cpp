@@ -541,15 +541,35 @@ struct Engine {
                 TexCoord = aTexCoord;
             })";
 
-        // Load fragment shader from file
-        std::ifstream in("tonemap.frag");
-        if (!in.is_open()) {
-            Logger::error("Failed to open tonemap.frag");
-            throw FileException("tonemap.frag", "Could not open file");
+        // Load fragment shader from file with multi-path search
+        std::vector<std::string> searchPaths = {
+            "tonemap.frag",
+            "../tonemap.frag",
+            "../../tonemap.frag"
+        };
+
+        std::string fragSource;
+        bool found = false;
+        for (const auto& path : searchPaths) {
+            std::ifstream in(path);
+            if (in.is_open()) {
+                std::stringstream ss;
+                ss << in.rdbuf();
+                fragSource = ss.str();
+                Logger::info("Loaded tonemap.frag from: ", path);
+                found = true;
+                break;
+            }
         }
-        std::stringstream ss;
-        ss << in.rdbuf();
-        std::string fragSource = ss.str();
+
+        if (!found) {
+            std::string errorMsg = "Failed to open tonemap.frag\nSearched in:\n";
+            for (const auto& path : searchPaths) {
+                errorMsg += "  - " + path + "\n";
+            }
+            Logger::error(errorMsg);
+            throw FileException("tonemap.frag", "Could not find file in any search path");
+        }
 
         return ShaderManager::createProgram(vertexShaderSource, fragSource.c_str());
     }

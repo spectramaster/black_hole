@@ -31,6 +31,22 @@ Real-time gravitational lensing and black hole visualization using GPU-accelerat
 
 ## 🚀 Quick Start
 
+### Running on macOS
+
+```bash
+./run_macos.sh
+```
+
+**OR** run from the project root directory (not from build/):
+
+```bash
+./build/BlackHole3D
+```
+
+⚠️ **Important**: Always run from the **project root directory**, not from the `build/` folder, to ensure shader files can be found.
+
+### Running on Linux/Windows
+
 ```bash
 ./build/BlackHole3D
 ```
