@@ -14,7 +14,8 @@
 in vec2 TexCoord;
 out vec4 FragColor;
 
-layout(std140, binding = 1) uniform Camera {
+// UBO bindings set programmatically for OpenGL 4.1 compatibility
+layout(std140) uniform Camera {
     vec3 camPos;     float _pad0;
     vec3 camRight;   float _pad1;
     vec3 camUp;      float _pad2;
@@ -25,21 +26,21 @@ layout(std140, binding = 1) uniform Camera {
     int   _pad4;
 } cam;
 
-layout(std140, binding = 2) uniform Disk {
+layout(std140) uniform Disk {
     float disk_r1;
     float disk_r2;
     float disk_num;
     float thickness;
 };
 
-layout(std140, binding = 3) uniform Objects {
+layout(std140) uniform Objects {
     int numObjects;
     vec4 objPosRadius[16];
     vec4 objColor[16];
     float  mass[16];
 };
 
-layout(std140, binding = 4) uniform KerrParams {
+layout(std140) uniform KerrParams {
     float spin;
     bool useKerr;
     float visualizationMode;
