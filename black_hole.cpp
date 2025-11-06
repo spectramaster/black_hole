@@ -846,8 +846,14 @@ struct Engine {
         // Clean up shader programs
         if (shaderProgram) glDeleteProgram(shaderProgram);
         if (tonemapProgram) glDeleteProgram(tonemapProgram);
+#ifdef USE_COMPUTE_RAYTRACING
         if (computeProgram) glDeleteProgram(computeProgram);
         if (computeProgramSchwarzschild) glDeleteProgram(computeProgramSchwarzschild);
+#else
+        if (raytraceProgram) glDeleteProgram(raytraceProgram);
+        if (raytraceProgramSchwarzschild) glDeleteProgram(raytraceProgramSchwarzschild);
+        if (hdrFBO) glDeleteFramebuffers(1, &hdrFBO);
+#endif
         if (gridShaderProgram) glDeleteProgram(gridShaderProgram);
 
         // Clean up bloom renderer (has its own cleanup)
